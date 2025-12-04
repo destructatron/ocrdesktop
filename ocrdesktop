@@ -16,6 +16,7 @@ __comments__  = "A accessibility tool for woring with inaccessible windows and d
 import os, sys, getopt, locale, time, re, _thread, shutil, tempfile
 from collections import defaultdict
 from mimetypes import MimeTypes
+from urllib.parse import urlparse, unquote
 
 #PIL
 from PIL import Image
@@ -49,23 +50,42 @@ except:
     webColorsAvailable = False
     
     
+def _detect_display_server():
+    """Detect if running on Wayland or X11."""
+    session_type = os.environ.get('XDG_SESSION_TYPE', '').lower()
+    if session_type in ('wayland', 'x11'):
+        return session_type
+    if os.environ.get('WAYLAND_DISPLAY'):
+        return 'wayland'
+    if os.environ.get('DISPLAY'):
+        return 'x11'
+    return None
+
+_displayServer = _detect_display_server()
+
 UIAvailable = True
+WnckAvailable = False
 try:
     #gi
     import gi
 
-    #GTK/GDK/Wnck/GObject
+    #GTK/GDK/GObject
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    gi.require_version("Wnck", "3.0")
-    from gi.repository import Gtk, Gdk, GObject, Wnck
+    from gi.repository import Gtk, Gdk, GObject, Gio, GLib
 
-    # AT-SPI
-    gi.require_version('Atspi', '2.0')
-    import pyatspi
+    # Wnck is X11-only, skip on Wayland
+    if _displayServer != 'wayland':
+        gi.require_version("Wnck", "3.0")
+        from gi.repository import Wnck
+        WnckAvailable = True
+
+    # AT-SPI (also X11-only for mouse/keyboard interaction)
+    if _displayServer != 'wayland':
+        gi.require_version('Atspi', '2.0')
+        import pyatspi
 except:
     UIAvailable = False
-
 
 # here the class
 class OCRScreenReader(Gtk.Window):
@@ -115,6 +135,7 @@ class OCRScreenReader(Gtk.Window):
         self.colorNames = []
         self.colorCache = {}
         self._file = ''
+        self._displayServer = _displayServer
     def _setHideGui(self, hideGui_p = False):
         self.hideGui = hideGui_p
 
@@ -164,6 +185,10 @@ class OCRScreenReader(Gtk.Window):
             return False
         return self._img[0] != None
     def _screenShotDesktop(self):
+        if self._displayServer == 'wayland':
+            if self._debug:
+                print("Wayland detected: using portal for desktop screenshot")
+            return self._screenShotPortal(interactive=False)
         CurrDesktop = Gdk.get_default_root_window()
         pixBuff = Gdk.pixbuf_get_from_window(CurrDesktop, 0, 0, CurrDesktop.get_width(), CurrDesktop.get_height())
         if (pixBuff != None):
@@ -177,7 +202,16 @@ class OCRScreenReader(Gtk.Window):
                 print("Could not take screenshot") 
             return False
 
-    def _screenShotWindow(self): 
+    def _screenShotWindow(self):
+        if self._displayServer == 'wayland':
+            if self._debug:
+                print("Wayland detected: using portal for window screenshot (interactive)")
+            result = self._screenShotPortal(interactive=True)
+            if not result:
+                if self._debug:
+                    print("Interactive mode failed, falling back to full screen capture")
+                result = self._screenShotPortal(interactive=False)
+            return result
         Gtk.main_iteration_do(False) # workarround segfault
         gdkCurrDesktop = Gdk.get_default_root_window()
         #currWindow = Gdk.gdk_screen_get_active_window(Gdk.gdk_screen_get_default())
@@ -218,6 +252,109 @@ class OCRScreenReader(Gtk.Window):
             mode = "RGBA"
         im = Image.frombytes(mode, (w, h), data, "raw", mode, stride)
         return im
+
+    def _screenShotPortal(self, interactive=True):
+        """Take screenshot using XDG Desktop Portal (for Wayland).
+
+        Args:
+            interactive: If True, shows selection dialog (for window mode)
+                        If False, captures entire screen (for desktop mode)
+
+        Returns:
+            bool: True if screenshot was successful
+        """
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Screenshot",
+                None
+            )
+
+            args = GLib.Variant('(sa{sv})', ('', {
+                'interactive': GLib.Variant.new_boolean(interactive),
+                'modal': GLib.Variant.new_boolean(True)
+            }))
+
+            screenshot_path = None
+            loop = GLib.MainLoop()
+
+            def on_response(connection, sender, path, interface, signal, params, user_data):
+                nonlocal screenshot_path
+                if not isinstance(params, GLib.Variant):
+                    if loop.is_running():
+                        loop.quit()
+                    return
+
+                response_code, results = params.unpack()
+
+                if response_code == 0 and 'uri' in results:
+                    parsed = urlparse(results['uri'])
+                    if parsed.scheme == 'file':
+                        screenshot_path = unquote(parsed.path)
+                else:
+                    if self._debug:
+                        print(f"Portal screenshot failed: code={response_code}")
+
+                if loop.is_running():
+                    loop.quit()
+
+            result = proxy.call_sync(
+                'Screenshot',
+                args,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None
+            )
+
+            request_handle = result.unpack()[0]
+
+            subscription_id = bus.signal_subscribe(
+                "org.freedesktop.portal.Desktop",
+                "org.freedesktop.portal.Request",
+                "Response",
+                request_handle,
+                None,
+                Gio.DBusSignalFlags.NO_MATCH_RULE,
+                on_response,
+                None
+            )
+
+            try:
+                GLib.timeout_add_seconds(60, lambda: (loop.quit() if loop.is_running() else None, False)[1])
+                loop.run()
+            finally:
+                bus.signal_unsubscribe(subscription_id)
+
+            if screenshot_path and os.path.exists(screenshot_path):
+                self._img = [Image.open(screenshot_path)]
+                self._offsetXpos = 0
+                self._offsetYpos = 0
+
+                if self._debug:
+                    print(f"Portal screenshot loaded: {screenshot_path}")
+                    self._img[0].save("/tmp/ocrScreenshot.png")
+
+                # Clean up temporary file created by portal
+                try:
+                    os.remove(screenshot_path)
+                except OSError:
+                    pass
+
+                return True
+            else:
+                if self._debug:
+                    print("Portal screenshot: No result or file not found")
+                return False
+
+        except Exception as e:
+            if self._debug:
+                print(f"Portal screenshot error: {e}")
+            return False
 
     def _scaleImg(self, img):
         width_screen, height_screen = img.size
