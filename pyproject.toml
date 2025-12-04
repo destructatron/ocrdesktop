@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocrdesktop"
+version = "4.1"
+description = "Accessibility tool for using OCR to read inaccessible windows and dialogs"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+authors = [
+    {name = "chrys"},
+    {name = "destructatron"},
+]
+keywords = ["ocr", "accessibility", "tesseract", "wayland", "x11"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Accessibility",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pytesseract",
+    "Pillow",
+    "PyGObject",
+]
+
+[project.optional-dependencies]
+color = ["scipy", "webcolors"]
+pdf = ["pdf2image"]
+all = ["scipy", "webcolors", "pdf2image"]
+
+[project.urls]
+Homepage = "https://github.com/destructatron/ocrdesktop"
+Repository = "https://github.com/destructatron/ocrdesktop"
+Issues = "https://github.com/destructatron/ocrdesktop/issues"
+
+[project.scripts]
+ocrdesktop = "ocrdesktop_pkg.app:main"
+
+[tool.setuptools.packages.find]
+include = ["ocrdesktop_pkg*"]
