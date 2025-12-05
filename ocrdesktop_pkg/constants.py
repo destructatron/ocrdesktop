@@ -1,6 +1,6 @@
 """Constants and version information for OCRdesktop."""
 
-__version__ = "4.1"
+__version__ = "4.2"
 __copyright__ = "Copyright (c) 2022 Chrys, 2025 destructatron"
 __license__ = "GPL"
 __authors__ = ["chrys", "destructatron"]
